@@ -1,4 +1,5 @@
 import gc
+import multiprocessing
 import random
 import time
 from functools import partial
@@ -16,6 +17,8 @@ from mesh_transformer.layers import EmbeddingShard, TransformerLayerShard, Relat
     TransformerLayerShardV2, Projection, EmbeddingShardV2
 from mesh_transformer.util import to_f32, to_bf16, maybe_shard, head_print, global_norm
 from jax.experimental import PartitionSpec as P
+
+import progressbar
 
 
 class CausalTransformerShard(hk.Module):
@@ -267,17 +270,24 @@ class CausalTransformer:
         example_shape = (max(dp // jax.host_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
-        head_print("key shape", jnp.array(key.take(mp_per_host)).shape)
-        head_print("in shape", x.shape)
+        head_print(f"\n\n\n{mp}", "TPU cores will be used to run the model.")
+        head_print("\nPlease wait as we initialize the transformer neural network necessary to run the model.", flush=True)
 
-        head_print("dp", dp)
-        head_print("mp", mp)
+        def show_spinner():
+            bar = progressbar.ProgressBar(max_value=progressbar.UnknownLength, widgets=[progressbar.Timer(), '  ', progressbar.AnimatedMarker('█▉▊▋▌▍▎▏▎▍▌▋▊▉█▓▒░ ░▒▓█▙▟▜▛▙▟▜▛█▇▆▅▄▃▂▁▕▔▏▁▕▔▏▖▗▝▘▖▗▝▘▁▕▔▏▁▕▔▏▁▂▃▄▅▆▇█▓▒░ ░▒▓')])
+            i = 0
+            while True:
+                bar.update(i)
+                time.sleep(0.1)
+                i += 1
+
+        spinner = multiprocessing.Process(target=show_spinner, args=())
+        spinner.start()
 
         self.gen_length = 1
         self.state = self.init_xmap(jnp.array(key.take(mp_per_host)), x)
 
-        param_count = hk.data_structures.tree_size(self.state['params'])
-        head_print(f"Total parameters: {param_count}")
+        spinner.terminate()
 
     def write_ckpt(self, path, shard):
         write_ckpt(self.state, path, shard)

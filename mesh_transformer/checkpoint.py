@@ -3,6 +3,7 @@ import io
 import json
 import time
 
+import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,6 +12,8 @@ import multiprocessing
 from smart_open import open
 
 from mesh_transformer.util import head_print
+
+import progressbar
 
 pieces = 16  # how many files to split each shard across
 
@@ -121,7 +124,7 @@ def reshard(x, old_shape):
     return out
 
 
-def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
+def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True, progressbar_units=287):
     if shards_out is None:
         shards_out = shards_in
 
@@ -129,15 +132,13 @@ def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
 
     original_opt_state = pytree["opt_state"]
 
-    def _unshard():
-        start = time.time()
+    def _unshard(bar):
         unsharded = []
         devices = jax.devices()
         device_count = len(devices)
         device_index = 0
 
         for file_index in range(pieces):
-            print(f"read_ckpt {file_index}.npz")
             array_keys = [*np.load(f"{dir}shard_0/{file_index}.npz").keys()]
             for array_index in range(len(array_keys)):
                 unstacked = []
@@ -154,21 +155,27 @@ def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
                     x = reshard(x, old_flattened[device_index].shape)
                 unsharded.append(x)
 
+                bar.update(device_index)
+
                 assert x.shape == old_flattened[device_index].shape, f"Incompatible checkpoints {x.shape} vs {old_flattened[device_index].shape}"
                 device_index += 1
 
-        print(f"read from disk/gcs in {time.time() - start:.06}s")
         return unsharded
 
-    try:
-        unsharded = _unshard()
-    except AssertionError:
-        load_opt = False  # no opt to load in ckpt
-        del pytree['opt_state']
-        old_flattened, structure = jax.tree_flatten(pytree)
-        unsharded = _unshard()
+    head_print("\n\n\nThis model has", hk.data_structures.tree_size(pytree['params']), "parameters.")
+    head_print("\nPlease wait while we load the model's tensors into the TPU memory.", flush=True)
+    with progressbar.ProgressBar(max_value=progressbar_units, widgets=[progressbar.AnimatedMarker('⡀⡁⡂⡃⡄⡅⡆⡇⡈⡉⡊⡋⡌⡍⡎⡏⡐⡑⡒⡓⡔⡕⡖⡗⡘⡙⡚⡛⡜⡝⡞⡟⡠⡡⡢⡣⡤⡥⡦⡧⡨⡩⡪⡫⡬⡭⡮⡯⡰⡱⡲⡳⡴⡵⡶⡷⡸⡹⡺⡻⡼⡽⡾⡿⢀⢁⢂⢃⢄⢅⢆⢇⢈⢉⢊⢋⢌⢍⢎⢏⢐⢑⢒⢓⢔⢕⢖⢗⢘⢙⢚⢛⢜⢝⢞⢟⢠⢡⢢⢣⢤⢥⢦⢧⢨⢩⢪⢫⢬⢭⢮⢯⢰⢱⢲⢳⢴⢵⢶⢷⢸⢹⢺⢻⢼⢽⢾⢿⣀⣁⣂⣃⣄⣅⣆⣇⣈⣉⣊⣋⣌⣍⣎⣏⣐⣑⣒⣓⣔⣕⣖⣗⣘⣙⣚⣛⣜⣝⣞⣟⣠⣡⣢⣣⣤⣥⣦⣧⣨⣩⣪⣫⣬⣭⣮⣯⣰⣱⣲⣳⣴⣵⣶⣷⣸⣹⣺⣻⣼⣽⣾⣿'), '  ', progressbar.ETA(), '   ', progressbar.Counter(), f'/{progressbar_units}  ', progressbar.Percentage(), '  ', progressbar.Bar(left='[', right=']', marker='█')]) as bar:
+        try:
+            unsharded = _unshard(bar)
+        except AssertionError:
+            load_opt = False  # no opt to load in ckpt
+            del pytree['opt_state']
+            old_flattened, structure = jax.tree_flatten(pytree)
+            unsharded = _unshard(bar)
 
     loaded_pytree = jax.tree_unflatten(structure, unsharded)
+
+    head_print("\nFinished loading the model!\n\n\n")
 
     if not load_opt:
         loaded_pytree['opt_state'] = original_opt_state

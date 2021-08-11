@@ -21,3 +21,4 @@ ftfy
 fastapi
 uvicorn
 lm_dataformat
+progressbar2
