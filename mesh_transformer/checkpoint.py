@@ -134,13 +134,17 @@ def reshard(x, old_shape):
     return out
 
 
-def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True, progressbar_units=287):
+def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
     if shards_out is None:
         shards_out = shards_in
 
     old_flattened, structure = jax.tree_flatten(pytree)
 
     original_opt_state = pytree["opt_state"]
+
+    n_tensors = 0
+    for file_index in range(pieces):
+        n_tensors += len(np.load(f"{dir}shard_0/{file_index}.npz").keys())
 
     def _unshard(bar):
         unsharded = []
@@ -174,7 +178,7 @@ def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True, progressba
 
     head_print("\n\n\nThis model has", hk.data_structures.tree_size(pytree['params']), "parameters.")
     head_print("\nPlease wait while we load the model's tensors into the TPU memory.", flush=True)
-    with progressbar.ProgressBar(max_value=progressbar_units, widgets=[progressbar.AnimatedMarker('⡀⡁⡂⡃⡄⡅⡆⡇⡈⡉⡊⡋⡌⡍⡎⡏⡐⡑⡒⡓⡔⡕⡖⡗⡘⡙⡚⡛⡜⡝⡞⡟⡠⡡⡢⡣⡤⡥⡦⡧⡨⡩⡪⡫⡬⡭⡮⡯⡰⡱⡲⡳⡴⡵⡶⡷⡸⡹⡺⡻⡼⡽⡾⡿⢀⢁⢂⢃⢄⢅⢆⢇⢈⢉⢊⢋⢌⢍⢎⢏⢐⢑⢒⢓⢔⢕⢖⢗⢘⢙⢚⢛⢜⢝⢞⢟⢠⢡⢢⢣⢤⢥⢦⢧⢨⢩⢪⢫⢬⢭⢮⢯⢰⢱⢲⢳⢴⢵⢶⢷⢸⢹⢺⢻⢼⢽⢾⢿⣀⣁⣂⣃⣄⣅⣆⣇⣈⣉⣊⣋⣌⣍⣎⣏⣐⣑⣒⣓⣔⣕⣖⣗⣘⣙⣚⣛⣜⣝⣞⣟⣠⣡⣢⣣⣤⣥⣦⣧⣨⣩⣪⣫⣬⣭⣮⣯⣰⣱⣲⣳⣴⣵⣶⣷⣸⣹⣺⣻⣼⣽⣾⣿'), '  ', progressbar.ETA(), '   ', progressbar.Counter(), f'/{progressbar_units}  ', progressbar.Percentage(), '  ', progressbar.Bar(left='[', right=']', marker='█')]) as bar:
+    with progressbar.ProgressBar(max_value=n_tensors, widgets=[progressbar.AnimatedMarker('⡀⡁⡂⡃⡄⡅⡆⡇⡈⡉⡊⡋⡌⡍⡎⡏⡐⡑⡒⡓⡔⡕⡖⡗⡘⡙⡚⡛⡜⡝⡞⡟⡠⡡⡢⡣⡤⡥⡦⡧⡨⡩⡪⡫⡬⡭⡮⡯⡰⡱⡲⡳⡴⡵⡶⡷⡸⡹⡺⡻⡼⡽⡾⡿⢀⢁⢂⢃⢄⢅⢆⢇⢈⢉⢊⢋⢌⢍⢎⢏⢐⢑⢒⢓⢔⢕⢖⢗⢘⢙⢚⢛⢜⢝⢞⢟⢠⢡⢢⢣⢤⢥⢦⢧⢨⢩⢪⢫⢬⢭⢮⢯⢰⢱⢲⢳⢴⢵⢶⢷⢸⢹⢺⢻⢼⢽⢾⢿⣀⣁⣂⣃⣄⣅⣆⣇⣈⣉⣊⣋⣌⣍⣎⣏⣐⣑⣒⣓⣔⣕⣖⣗⣘⣙⣚⣛⣜⣝⣞⣟⣠⣡⣢⣣⣤⣥⣦⣧⣨⣩⣪⣫⣬⣭⣮⣯⣰⣱⣲⣳⣴⣵⣶⣷⣸⣹⣺⣻⣼⣽⣾⣿'), '  ', progressbar.ETA(), '   ', progressbar.Counter(), f'/{n_tensors}  ', progressbar.Percentage(), '  ', progressbar.Bar(left='[', right=']', marker='█')]) as bar:
         try:
             unsharded = _unshard(bar)
         except AssertionError:
