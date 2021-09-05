@@ -1,3 +1,6 @@
+# Branch summary
+This branch is the same as the **all** branch but with more informative logging when you're using this software to initialize a transformer network and load a checkpoint.
+
 ## Patches in this branch:
 * __(/mesh_transformer/checkpoint.py and /mesh_transformer/transformer_shard.py)__ Added some extra logging.
 * __(/requirements.txt)__ Removed requirements that aren't needed to use inference and relaxed most of the still-existing requirements. Also now requires progressbar2. Installation takes less time now.
