@@ -27,6 +27,7 @@ class CausalTransformerShard(hk.Module):
         heads = config["n_heads"]
         shards = config["cores_per_replica"]
         layer_count = config["layers"]
+        self.compat = config.get("compat", "j")
 
         self.transformer_layers = []
         self.heads = heads
@@ -37,8 +38,9 @@ class CausalTransformerShard(hk.Module):
 
         init_scale = 2. / layer_count
 
+        attention_layers = config.get("attention_layers", ["global" if self.compat != "neo" or i % 2 == 0 else "local" for i in range(config["layers"])])
         for i in range(layer_count):
-            self.transformer_layers.append(TransformerLayerShard(config, name=f"layer_{i}", init_scale=init_scale))
+            self.transformer_layers.append(TransformerLayerShard(config, name=f"layer_{i}", init_scale=init_scale, attention_type=attention_layers[i]))
 
         self.proj = ProjectionShard(config)
 
@@ -57,10 +59,12 @@ class CausalTransformerShard(hk.Module):
 
         attn_bias += mask
 
-        x = hk.remat(self.embed)(context)
+        x = hk.remat(self.embed)(context, pe_length=input_len)
 
         for l in self.transformer_layers:
             x = x + hk.remat(l)(x, attn_bias)
+            if l.compat == "neo":
+                x = x + hk.remat(l.neo_ff)(x)
 
         return hk.remat(self.proj.loss)(x, target, z_loss)
 
@@ -86,13 +90,15 @@ class CausalTransformerShard(hk.Module):
         else:
             attn_bias = 0
 
-        x = self.embed(context)
+        x = self.embed(context, pe_length=length - 1)
 
         states = []
 
         for l in self.transformer_layers:
             res, layer_state = l.get_init_decode_state(x, length - 1, attn_bias)
             x = x + res
+            if l.compat == "neo":
+                x = x + l.neo_ff(x)
             states.append(layer_state)
 
         return self.proj(x), (last.astype(jnp.uint32), states, hk.next_rng_key())
@@ -106,13 +112,15 @@ class CausalTransformerShard(hk.Module):
         else:
             attn_bias = 0
 
-        x = self.embed(new_tok)
+        x = self.embed(new_tok, pe_length=state[0]["tokens_decoded"] + 1)
 
         new_states = []
 
         for l, s in zip(self.transformer_layers, state):
             res, layer_state = l.decode_once(s, x, attn_bias)
             x = x + res
+            if l.compat == "neo":
+                x = x + l.neo_ff(x)
             new_states.append(layer_state)
 
         return self.proj(x), new_states
@@ -265,7 +273,7 @@ class CausalTransformer:
         mp_per_host = min(mp, 8)
 
         seq = config["seq"]
-        vocab = config["n_vocab"]
+        vocab = config["n_vocab"] + config.get("n_vocab_padding", 0)
 
         example_shape = (max(dp // jax.host_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
