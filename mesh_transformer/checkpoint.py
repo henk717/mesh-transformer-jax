@@ -204,8 +204,11 @@ def read_ckpt_lowmem(pytree, dir, shards_in, shards_out=None, load_opt=True):
 
     original_opt_state = pytree["opt_state"]
 
-    def _unshard():
-        start = time.time()
+    n_tensors = 0
+    for file_index in range(pieces):
+        n_tensors += len(np.load(f"{dir}shard_0/{file_index}.npz").keys())
+
+    def _unshard(bar):
         unsharded = []
         devices = jax.devices()
         device_count = len(devices)
@@ -228,21 +231,27 @@ def read_ckpt_lowmem(pytree, dir, shards_in, shards_out=None, load_opt=True):
                     x = reshard(x, old_flattened[device_index].shape)
                 unsharded.append(x)
 
+                bar.update(device_index)
+
                 assert x.shape == old_flattened[device_index].shape, f"Incompatible checkpoints {x.shape} vs {old_flattened[device_index].shape}"
                 device_index += 1
 
-        print(f"read from disk/gcs in {time.time() - start:.06}s")
         return unsharded
 
-    try:
-        unsharded = _unshard()
-    except AssertionError:
-        load_opt = False  # no opt to load in ckpt
-        del pytree['opt_state']
-        old_flattened, structure = jax.tree_flatten(pytree)
-        unsharded = _unshard()
+    head_print("\n\n\nThis model has", hk.data_structures.tree_size(pytree['params']), "parameters.")
+    head_print("\nPlease wait while we load the model's tensors into the TPU memory.", flush=True)
+    with progressbar.ProgressBar(max_value=n_tensors, widgets=[progressbar.AnimatedMarker('⡀⡁⡂⡃⡄⡅⡆⡇⡈⡉⡊⡋⡌⡍⡎⡏⡐⡑⡒⡓⡔⡕⡖⡗⡘⡙⡚⡛⡜⡝⡞⡟⡠⡡⡢⡣⡤⡥⡦⡧⡨⡩⡪⡫⡬⡭⡮⡯⡰⡱⡲⡳⡴⡵⡶⡷⡸⡹⡺⡻⡼⡽⡾⡿⢀⢁⢂⢃⢄⢅⢆⢇⢈⢉⢊⢋⢌⢍⢎⢏⢐⢑⢒⢓⢔⢕⢖⢗⢘⢙⢚⢛⢜⢝⢞⢟⢠⢡⢢⢣⢤⢥⢦⢧⢨⢩⢪⢫⢬⢭⢮⢯⢰⢱⢲⢳⢴⢵⢶⢷⢸⢹⢺⢻⢼⢽⢾⢿⣀⣁⣂⣃⣄⣅⣆⣇⣈⣉⣊⣋⣌⣍⣎⣏⣐⣑⣒⣓⣔⣕⣖⣗⣘⣙⣚⣛⣜⣝⣞⣟⣠⣡⣢⣣⣤⣥⣦⣧⣨⣩⣪⣫⣬⣭⣮⣯⣰⣱⣲⣳⣴⣵⣶⣷⣸⣹⣺⣻⣼⣽⣾⣿'), '  ', progressbar.ETA(), '   ', progressbar.Counter(), f'/{n_tensors}  ', progressbar.Percentage(), '  ', progressbar.Bar(left='[', right=']', marker='█')]) as bar:
+        try:
+            unsharded = _unshard(bar)
+        except AssertionError:
+            load_opt = False  # no opt to load in ckpt
+            del pytree['opt_state']
+            old_flattened, structure = jax.tree_flatten(pytree)
+            unsharded = _unshard(bar)
 
     loaded_pytree = jax.tree_unflatten(structure, unsharded)
+
+    head_print("\nFinished loading the model!\n\n\n")
 
     if not load_opt:
         loaded_pytree['opt_state'] = original_opt_state
