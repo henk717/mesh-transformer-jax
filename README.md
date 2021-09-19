@@ -1,6 +1,8 @@
 # Branch summary
 This branch is the same as the **all** branch but with more informative logging when you're using this software to initialize a transformer network and load a checkpoint.
 
+This branch also additionally still has the **lowmem** patch for compatibility reasons. This just makes `read_ckpt` behave identically to `read_ckpt_lowmem`.
+
 ## Patches in this branch:
 * __(/mesh_transformer/checkpoint.py and /mesh_transformer/transformer_shard.py)__ Added some extra logging.
 
