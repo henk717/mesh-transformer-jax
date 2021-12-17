@@ -232,7 +232,7 @@ class CausalTransformer:
                                                     in_axes=(["shard", ...],
                                                              ["batch", ...]),
                                                     out_axes=["shard", ...],
-                                                    axis_resources={'shard': 'mp', 'batch': 'dp'})
+                                                    axis_resources={'shard': 'shard', 'batch': 'batch'})
 
         self.eval_xmap = jax.experimental.maps.xmap(fun=eval,
                                                     in_axes=(["shard", ...],
@@ -240,7 +240,7 @@ class CausalTransformer:
                                                              ["batch", ...],
                                                              ["batch", ...]),
                                                     out_axes=["batch", ...],
-                                                    axis_resources={'shard': 'mp', 'batch': 'dp'})
+                                                    axis_resources={'shard': 'shard', 'batch': 'batch'})
 
         self.train_xmap = jax.experimental.maps.xmap(fun=train,
                                                      in_axes=(["shard", ...],
@@ -248,7 +248,7 @@ class CausalTransformer:
                                                               ["batch", ...]),
                                                      out_axes=(["batch", ...], ["batch", ...], ["batch", ...], ["batch", ...], ["shard", ...]),
                                                      donate_argnums=(0,),
-                                                     axis_resources={'shard': 'mp', 'batch': 'dp'})
+                                                     axis_resources={'shard': 'shard', 'batch': 'batch'})
 
         self.generate_xmap = jax.experimental.maps.xmap(fun=generate,
                                                         in_axes=(["shard", ...],
@@ -259,29 +259,29 @@ class CausalTransformer:
                                                                  ["batch", ...],
                                                                  ["shard", ...]),
                                                         out_axes=["batch", ...],
-                                                        axis_resources={'shard': 'mp', 'batch': 'dp'})
+                                                        axis_resources={'shard': 'shard', 'batch': 'batch'})
 
         self.move_xmap = jax.experimental.maps.xmap(fun=lambda x, _: to_bf16(x),
                                                     in_axes=(["shard", ...], ["batch", ...]),
                                                     out_axes=["shard", ...],
-                                                    axis_resources={'shard': 'mp', 'batch': 'dp'})
+                                                    axis_resources={'shard': 'shard', 'batch': 'batch'})
 
         key = hk.PRNGSequence(42)
 
-        assert thread_resources.env.shape['mp'] == config["cores_per_replica"]
+        assert thread_resources.env.shape['shard'] == config["cores_per_replica"]
 
-        dp = thread_resources.env.shape['dp']
-        mp = thread_resources.env.shape['mp']
+        batch = thread_resources.env.shape['batch']
+        shard = thread_resources.env.shape['shard']
 
-        mp_per_host = min(mp, 8)
+        mp_per_host = min(shard, 8)
 
         seq = config["seq"]
         vocab = config["n_vocab"] + config.get("n_vocab_padding", 0)
 
-        example_shape = (max(dp // jax.host_count(), 1), seq,)
+        example_shape = (max(batch // jax.host_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
-        head_print(f"\n\n\n{mp}", "TPU cores will be used to run the model.")
+        head_print(f"\n\n\n{shard}", "TPU cores will be used to run the model.")
         if config.get("compat", "j") == "neo":
             head_print("\nRunning in GPT-Neo compatibility mode.")
         head_print("\nPlease wait as we initialize the transformer neural network necessary to run the model.", flush=True)
@@ -306,7 +306,7 @@ class CausalTransformer:
         write_ckpt(self.state, path, shard)
 
     def load_ckpt(self, path):
-        self.state = read_ckpt(self.state, path, thread_resources.env.shape['mp'])
+        self.state = read_ckpt(self.state, path, thread_resources.env.shape['shard'])
 
     def train(self, sample):
         # print("train iter")
@@ -378,24 +378,24 @@ class CausalTransformerV2:
         early_collect = config.get("early_collect", True)
 
         def embedding(x):
-            x = maybe_shard(x, P("dp", None))
+            x = maybe_shard(x, P("batch", None))
             return EmbeddingShardV2(config)(x)
 
         def residual(x, mask):
             out = x + TransformerLayerShardV2(config, init_scale=2. / config["layers"])(x, mask)
-            return maybe_shard(out, P("dp", None, "mp"))
+            return maybe_shard(out, P("batch", None, "shard"))
 
         def init_decode(x, given_length, mask):
             residual, decode_state = TransformerLayerShardV2(config, init_scale=2. / config["layers"])\
                 .get_init_decode_state(x, given_length, mask)
             out = x + residual
-            return maybe_shard(out, P("dp", None, "mp")), decode_state
+            return maybe_shard(out, P("batch", None, "shard")), decode_state
 
         def iter_decode(decode_state, x):
             residual, decode_state = TransformerLayerShardV2(config, init_scale=2. / config["layers"])\
                 .decode_once(decode_state, x, 0)
             out = x + residual
-            return maybe_shard(out, P("dp", None, "mp")), decode_state
+            return maybe_shard(out, P("batch", None, "shard")), decode_state
 
         def transformer(x, mask):
             return hk.remat(residual, prevent_cse=False)(x, mask)
@@ -474,13 +474,13 @@ class CausalTransformerV2:
 
             return output_state
 
-        assert thread_resources.env.shape['mp'] == config["cores_per_replica"]
+        assert thread_resources.env.shape['shard'] == config["cores_per_replica"]
 
-        dp = thread_resources.env.shape['dp']
-        mp = thread_resources.env.shape['mp']
+        batch = thread_resources.env.shape['batch']
+        shard = thread_resources.env.shape['shard']
 
         key = hk.PRNGSequence(42)
-        x = jax.random.uniform(next(key), (mp * dp, 16), minval=0, maxval=1).astype(jnp.uint32)  # batch, seq
+        x = jax.random.uniform(next(key), (shard * batch, 16), minval=0, maxval=1).astype(jnp.uint32)  # batch, seq
 
         head_print("starting shape evaluation")
 
@@ -490,12 +490,12 @@ class CausalTransformerV2:
                 "step": P(),
 
                 # fp32 params are also sharded (so this is like a weird mix between zero-1 and zero-3...)
-                "params": jax.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["params"]),
+                "params": jax.tree_map(partial(shard_strategy, parallel=["shard", "batch"]), param_shapes["params"]),
             }
 
         if "opt_state" in param_shapes:
-            # zero level 1: shard optimizer states over both MP and DP
-            state_shard["opt_state"] = jax.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["opt_state"])
+            # zero level 1: shard optimizer states over both shard and batch
+            state_shard["opt_state"] = jax.tree_map(partial(shard_strategy, parallel=["shard", "batch"]), param_shapes["opt_state"])
 
         self.state_shard = state_shard
 
@@ -504,7 +504,7 @@ class CausalTransformerV2:
         # head_print("param_shapes: ", param_shapes)
         jax.tree_multimap(head_print, state_shard, param_shapes)
 
-        self.init_pjit = pjit(init, in_axis_resources=(None, P("dp")), out_axis_resources=state_shard)
+        self.init_pjit = pjit(init, in_axis_resources=(None, P("batch")), out_axis_resources=state_shard)
 
         def apply_fns():
             embed_apply_fn = hk.without_apply_rng(hk.transform(embedding)).apply
@@ -533,7 +533,7 @@ class CausalTransformerV2:
 
             return projection_apply_fn(params["proj"], x, y)
 
-        mp_shard_strategy = jax.tree_map(partial(shard_strategy, parallel=["mp"]), param_shapes["params"])
+        mp_shard_strategy = jax.tree_map(partial(shard_strategy, parallel=["shard"]), param_shapes["params"])
 
         def train(state, ctx, tgt):
             if early_collect:
@@ -568,7 +568,7 @@ class CausalTransformerV2:
             }
 
         self.train_pjit = pjit(train,
-                               in_axis_resources=(state_shard, P(None, "dp"), P(None, "dp")),
+                               in_axis_resources=(state_shard, P(None, "batch"), P(None, "batch")),
                                out_axis_resources=(None, None, state_shard),
                                donate_argnums=(0,))
 
@@ -614,8 +614,8 @@ class CausalTransformerV2:
 
         self.eval_pjit = pjit(eval,
                               in_axis_resources=(mp_shard_strategy if early_collect else state_shard["params"],
-                                                 P("dp"), P("dp"), P("dp")),
-                              out_axis_resources=P("dp"))
+                                                 P("batch"), P("batch"), P("batch")),
+                              out_axis_resources=P("batch"))
 
         def generate(params, key, ctx, ctx_length, aux, sampler_options):
             sampler = config["sampler"]
@@ -680,13 +680,13 @@ class CausalTransformerV2:
         seq = config["seq"]
         vocab = config["n_vocab"]
 
-        example_shape = (max(dp // jax.host_count(), 1), seq,)
+        example_shape = (max(batch // jax.host_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
         head_print("in shape", x.shape)
 
-        head_print("dp", dp)
-        head_print("mp", mp)
+        head_print("batch", batch)
+        head_print("shard", shard)
 
         self.state = self.init_pjit(next(key), x)
         self.state_shard = state_shard
@@ -697,7 +697,7 @@ class CausalTransformerV2:
             self.eval_weights = self.state["params"]
 
         param_count = hk.data_structures.tree_size(self.state['params'])
-        head_print(f"Total parameters: {param_count * dp}")
+        head_print(f"Total parameters: {param_count * batch}")
 
     def write_ckpt(self, path, _):
         write_ckpt_v2(self.state, path)

@@ -269,7 +269,7 @@ class EmbeddingShardV2(hk.Module):
 
     def __call__(self, x, dtype=jnp.bfloat16):
         input_onehot = jax.nn.one_hot(x, self.in_dim)
-        input_onehot = maybe_shard(input_onehot, P("dp", None, "mp"))
+        input_onehot = maybe_shard(input_onehot, P("batch", None, "shard"))
 
         proj_out = self.proj(input_onehot)
 
@@ -457,7 +457,7 @@ class TransformerLayerShardV2(hk.Module):
         self.n_head = config["n_heads"]
         self.d_head = config["d_head"]
         self.d_rotary = config["pe_rotary_dims"]
-        self.mp_num = thread_resources.env.shape['mp']
+        self.mp_num = thread_resources.env.shape['shard']
 
         self.norm = hk.LayerNorm(-1, True, True)
         self.input_proj = hk.Linear(self.d_head * self.n_head * 3 + self.dim * 8)
@@ -474,36 +474,36 @@ class TransformerLayerShardV2(hk.Module):
         sincos = fixed_pos_embedding(k_rot, seq_dim=1)
         q_rot = apply_rotary_pos_emb_v2(q_rot, sincos)
         k_rot = apply_rotary_pos_emb_v2(k_rot, sincos)
-        q_rot = maybe_shard(q_rot, P("dp", None, "mp", None))
-        k_rot = maybe_shard(k_rot, P("dp", None, "mp", None))
+        q_rot = maybe_shard(q_rot, P("batch", None, "shard", None))
+        k_rot = maybe_shard(k_rot, P("batch", None, "shard", None))
 
         k = jnp.concatenate([k_rot, k_pass], axis=-1)
         q = jnp.concatenate([q_rot, q_pass], axis=-1)
 
-        k = maybe_shard(k, P("dp", None, "mp", None))
-        q = maybe_shard(q, P("dp", None, "mp", None))
+        k = maybe_shard(k, P("batch", None, "shard", None))
+        q = maybe_shard(q, P("batch", None, "shard", None))
 
         attention_logits = jnp.einsum("bthd,bThd->bhtT", q, k)
 
-        attention_logits = maybe_shard(attention_logits, P("dp", "mp", None, None))
+        attention_logits = maybe_shard(attention_logits, P("batch", "shard", None, None))
 
         sqrt_key_size = np.sqrt(self.d_head).astype(k.dtype)
         attention_logits = attention_logits / sqrt_key_size
 
         attention_logits += attn_bias
-        attention_logits = maybe_shard(attention_logits, P("dp", "mp", None, None))
+        attention_logits = maybe_shard(attention_logits, P("batch", "shard", None, None))
 
         attention_weights = jax.nn.softmax(attention_logits)
-        attention_weights = maybe_shard(attention_weights, P("dp", "mp", None, None))
+        attention_weights = maybe_shard(attention_weights, P("batch", "shard", None, None))
 
         attention_vec = jnp.einsum("bhtT,bThd->bthd", attention_weights, v)
 
-        attention_vec = maybe_shard(attention_vec, P("dp", None, "mp", None))
+        attention_vec = maybe_shard(attention_vec, P("batch", None, "shard", None))
         sharded_attn_vec = attention_vec.reshape(attention_vec.shape[:2] + (self.mp_num, self.n_head//self.mp_num, -1))
-        sharded_attn_vec = maybe_shard(sharded_attn_vec, P("dp", None, "mp", None, None))
+        sharded_attn_vec = maybe_shard(sharded_attn_vec, P("batch", None, "shard", None, None))
 
         attention_vec = attention_vec.reshape(sharded_attn_vec.shape[:2] + (self.mp_num, -1))
-        return maybe_shard(attention_vec, P("dp", None, "mp", None))
+        return maybe_shard(attention_vec, P("batch", None, "shard", None))
 
     # input: [batch, seq, dim]
     # output: [batch, seq, n_head, d_head]
@@ -512,16 +512,16 @@ class TransformerLayerShardV2(hk.Module):
         reshaped = reshaped.reshape(x.shape[:-2] + (-1, ) + x.shape[-1:])
 
         # return reshaped
-        return maybe_shard(reshaped, P("dp", None, "mp", None))
+        return maybe_shard(reshaped, P("batch", None, "shard", None))
 
     def input(self, x):
         # [batch, seq, dim]
         projected = self.input_proj(x)
 
-        # [batch, seq, mp, dim//mp]
-        projected = maybe_shard(projected, P("dp", None, "mp"))
+        # [batch, seq, shard, dim//shard]
+        projected = maybe_shard(projected, P("batch", None, "shard"))
         mp_split = jnp.reshape(projected, projected.shape[:-1] + (self.mp_num, -1))
-        mp_split = maybe_shard(mp_split, P("dp", None, "mp", None))
+        mp_split = maybe_shard(mp_split, P("batch", None, "shard", None))
 
         local_dim = self.d_head * self.n_head // self.mp_num
 
@@ -535,10 +535,10 @@ class TransformerLayerShardV2(hk.Module):
 
     def output(self, *x):
         out = jnp.concatenate(x, axis=-1)
-        out = maybe_shard(out, P("dp", None, "mp", None))
+        out = maybe_shard(out, P("batch", None, "shard", None))
 
         out = out.reshape(x[0].shape[:-2] + (-1,))
-        out_shard = maybe_shard(out, P("dp", None, "mp"))
+        out_shard = maybe_shard(out, P("batch", None, "shard"))
 
         return self.output_proj(out_shard)
 
@@ -564,7 +564,7 @@ class TransformerLayerShardV2(hk.Module):
 
         return self.output(attn_out, ff_out)
 
-    # [batch, seq, mp, dim*2//mp]
+    # [batch, seq, shard, dim*2//shard]
     def glu(self, x):
         out, gate = jnp.split(x, 2, axis=-1)
 
