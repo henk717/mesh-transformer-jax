@@ -12,7 +12,7 @@ import multiprocessing
 import ray
 from smart_open import open
 
-from mesh_transformer.util import head_print
+from mesh_transformer.util import head_print, to_bf16
 
 import progressbar
 
@@ -134,6 +134,12 @@ def reshard(x, old_shape):
     return out
 
 
+move_xmap = jax.experimental.maps.xmap(fun=lambda x, _: to_bf16(x),
+                                       in_axes=(["shard", ...], ["batch", ...]),
+                                       out_axes=["shard", ...],
+                                       axis_resources={'shard': 'mp', 'batch': 'dp'})
+
+
 def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
     if shards_out is None:
         shards_out = shards_in
@@ -163,7 +169,7 @@ def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
                         array.dtype = jnp.bfloat16
                     unstacked.append(array)
 
-                x = jax.device_put(jnp.stack(unstacked), device=devices[device_index % device_count])
+                x = move_xmap(jnp.stack(unstacked), np.empty(shards_in))
 
                 if shards_out != shards_in:
                     x = reshard(x, old_flattened[device_index].shape)
@@ -196,66 +202,8 @@ def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
     return loaded_pytree
 
 
-def read_ckpt_lowmem(pytree, dir, shards_in, shards_out=None, load_opt=True):
-    if shards_out is None:
-        shards_out = shards_in
-
-    old_flattened, structure = jax.tree_flatten(pytree)
-
-    original_opt_state = pytree["opt_state"]
-
-    n_tensors = 0
-    for file_index in range(pieces):
-        n_tensors += len(np.load(f"{dir}shard_0/{file_index}.npz").keys())
-
-    def _unshard(bar):
-        unsharded = []
-        devices = jax.devices()
-        device_count = len(devices)
-        device_index = 0
-
-        for file_index in range(pieces):
-            array_keys = [*np.load(f"{dir}shard_0/{file_index}.npz").keys()]
-            for array_index in range(len(array_keys)):
-                unstacked = []
-                for shard_index in range(shards_in):
-                    npz = np.load(f"{dir}shard_{shard_index}/{file_index}.npz")
-                    array = npz[array_keys[array_index]]
-                    if array.dtype == 'V2':
-                        array.dtype = jnp.bfloat16
-                    unstacked.append(array)
-
-                x = jax.device_put(jnp.stack(unstacked), device=devices[device_index % device_count])
-
-                if shards_out != shards_in:
-                    x = reshard(x, old_flattened[device_index].shape)
-                unsharded.append(x)
-
-                bar.update(device_index)
-
-                assert x.shape == old_flattened[device_index].shape, f"Incompatible checkpoints {x.shape} vs {old_flattened[device_index].shape}"
-                device_index += 1
-
-        return unsharded
-
-    head_print("\n\n\nThis model has", hk.data_structures.tree_size(pytree['params']), "parameters.")
-    head_print("\nPlease wait while we load the model's tensors into the TPU memory.", flush=True)
-    with progressbar.ProgressBar(max_value=n_tensors, widgets=[progressbar.AnimatedMarker('⡀⡁⡂⡃⡄⡅⡆⡇⡈⡉⡊⡋⡌⡍⡎⡏⡐⡑⡒⡓⡔⡕⡖⡗⡘⡙⡚⡛⡜⡝⡞⡟⡠⡡⡢⡣⡤⡥⡦⡧⡨⡩⡪⡫⡬⡭⡮⡯⡰⡱⡲⡳⡴⡵⡶⡷⡸⡹⡺⡻⡼⡽⡾⡿⢀⢁⢂⢃⢄⢅⢆⢇⢈⢉⢊⢋⢌⢍⢎⢏⢐⢑⢒⢓⢔⢕⢖⢗⢘⢙⢚⢛⢜⢝⢞⢟⢠⢡⢢⢣⢤⢥⢦⢧⢨⢩⢪⢫⢬⢭⢮⢯⢰⢱⢲⢳⢴⢵⢶⢷⢸⢹⢺⢻⢼⢽⢾⢿⣀⣁⣂⣃⣄⣅⣆⣇⣈⣉⣊⣋⣌⣍⣎⣏⣐⣑⣒⣓⣔⣕⣖⣗⣘⣙⣚⣛⣜⣝⣞⣟⣠⣡⣢⣣⣤⣥⣦⣧⣨⣩⣪⣫⣬⣭⣮⣯⣰⣱⣲⣳⣴⣵⣶⣷⣸⣹⣺⣻⣼⣽⣾⣿'), '  ', progressbar.ETA(), '   ', progressbar.Counter(), f'/{n_tensors}  ', progressbar.Percentage(), '  ', progressbar.Bar(left='[', right=']', marker='█')]) as bar:
-        try:
-            unsharded = _unshard(bar)
-        except AssertionError:
-            load_opt = False  # no opt to load in ckpt
-            del pytree['opt_state']
-            old_flattened, structure = jax.tree_flatten(pytree)
-            unsharded = _unshard(bar)
-
-    loaded_pytree = jax.tree_unflatten(structure, unsharded)
-
-    head_print("\nFinished loading the model!\n\n\n")
-
-    if not load_opt:
-        loaded_pytree['opt_state'] = original_opt_state
-    return loaded_pytree
+def read_ckpt_lowmem(*args, **kwargs):
+    return read_ckpt(*args, **kwargs)
 
 
 def parallel_write(arrays, fname):
