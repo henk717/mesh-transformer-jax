@@ -1,7 +1,10 @@
 # Branch summary
-This branch is the same as the **all** branch but with more informative logging when you're using this software to initialize a transformer network and load a checkpoint.
+A modified version of the **ck** branch designed as a test to show that loading the 13B fairseq MoE dense model is possible in Colab TPU instances.
 
 ## Patches in this branch:
+* __(/mesh_transformer/transformer_shard.py)__: `init_xmap` is now skipped completely in order to conserve device memory.
+
+Inherited from **ck**:
 * __(/mesh_transformer/checkpoint.py and /mesh_transformer/transformer_shard.py)__ Added some extra logging.
 
 Inherited from **soft**:

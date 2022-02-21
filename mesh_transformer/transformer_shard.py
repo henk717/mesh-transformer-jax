@@ -284,7 +284,6 @@ class CausalTransformer:
         head_print(f"\n\n\n{mp}", "TPU cores will be used to run the model.")
         if config.get("compat", "j") == "neo":
             head_print("\nRunning in GPT-Neo compatibility mode.")
-        head_print("\nPlease wait as we initialize the transformer neural network necessary to run the model.", flush=True)
 
         def show_spinner():
             bar = progressbar.ProgressBar(max_value=progressbar.UnknownLength, widgets=[progressbar.Timer(), '  ', progressbar.AnimatedMarker('█▉▊▋▌▍▎▏▎▍▌▋▊▉█▓▒░ ░▒▓█▙▟▜▛▙▟▜▛█▇▆▅▄▃▂▁▕▔▏▁▕▔▏▖▗▝▘▖▗▝▘▁▕▔▏▁▕▔▏▁▂▃▄▅▆▇█▓▒░ ░▒▓')])
@@ -294,13 +293,11 @@ class CausalTransformer:
                 time.sleep(0.1)
                 i += 1
 
-        spinner = multiprocessing.Process(target=show_spinner, args=())
-        spinner.start()
-
         self.gen_length = 1
-        self.state = self.init_xmap(jnp.array(key.take(mp_per_host)), x)
-
-        spinner.terminate()
+        self.state = {
+            "step": jnp.zeros(mp, dtype=jnp.uint32),
+            "opt_state": optimizer.init({})
+        }
 
     def write_ckpt(self, path, shard):
         write_ckpt(self.state, path, shard)
