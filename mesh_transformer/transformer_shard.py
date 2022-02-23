@@ -282,8 +282,11 @@ class CausalTransformer:
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
         head_print(f"\n\n\n{mp}", "TPU cores will be used to run the model.")
-        if config.get("compat", "j") == "neo":
+        compat = config.get("compat", "j")
+        if compat == "neo":
             head_print("\nRunning in GPT-Neo compatibility mode.")
+        elif compat == "fairseq_lm":
+            head_print("\nRunning in fairseq compatibility mode.")
         head_print("\nPlease wait as we initialize the transformer neural network necessary to run the model.", flush=True)
 
         def show_spinner():
