@@ -378,7 +378,8 @@ class CausalTransformer:
             head_print("\nRunning in GPT-Neo compatibility mode.")
         elif compat == "fairseq_lm":
             head_print("\nRunning in fairseq compatibility mode.")
-        head_print("\nPlease wait as we initialize the transformer neural network necessary to run the model.", flush=True)
+        if not dematerialized:
+            head_print("\nPlease wait as we initialize the transformer neural network necessary to run the model.", flush=True)
 
         def show_spinner():
             bar = progressbar.ProgressBar(max_value=progressbar.UnknownLength, widgets=[progressbar.Timer(), '  ', progressbar.AnimatedMarker('█▉▊▋▌▍▎▏▎▍▌▋▊▉█▓▒░ ░▒▓█▙▟▜▛▙▟▜▛█▇▆▅▄▃▂▁▕▔▏▁▕▔▏▖▗▝▘▖▗▝▘▁▕▔▏▁▕▔▏▁▂▃▄▅▆▇█▓▒░ ░▒▓')])
