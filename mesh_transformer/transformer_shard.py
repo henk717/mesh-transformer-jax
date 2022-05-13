@@ -406,6 +406,8 @@ class CausalTransformer:
             head_print("\nRunning in fairseq compatibility mode.")
         elif compat == "neox":
             head_print("\nRunning in NeoX compatibility mode.")
+        elif compat == "opt":
+            head_print("\nRunning in OPT compatibility mode.")
         if not dematerialized:
             head_print("\nPlease wait as we initialize the transformer neural network necessary to run the model.", flush=True)
 
