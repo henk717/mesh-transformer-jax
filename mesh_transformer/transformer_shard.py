@@ -54,7 +54,7 @@ def compute_placeholder_params(config: dict):
     do_layer_norm_before = config.get("do_layer_norm_before", True)
     transposed_linear = config.get("transposed_linear", False)
 
-    if compat not in ("j", "neo", "fairseq_lm", "neox", "opt", "bloom"):
+    if compat not in ("j", "neo", "fairseq_lm", "neox", "opt", "bloom", "llama"):
         raise NotImplementedError(f"Unsupported model type {repr(compat)}")
     if pe not in ("rotary", "neox_rotary", "fixed", "sinusoidal", "fairseq_sinusoidal", "alibi", "t5"):
         raise NotImplementedError(f"Unsupported positional embedding type {repr(pe)}")
@@ -63,11 +63,14 @@ def compute_placeholder_params(config: dict):
     seq = config["seq"]
     in_dim = config["n_vocab"] + config.get("n_vocab_padding", 0)
     out_dim = config["d_model"]
+    intermediate_size = config.get("intermediate_size", out_dim)
     d_embed = config.get("d_embed", out_dim)
     shards = config["cores_per_replica"]
     in_dim_per_shard = in_dim // shards
     out_dim_per_shard = out_dim // shards
-    ffn_dim_per_shard = out_dim_per_shard * 4
+    multiplier = 4 if intermediate_size == out_dim else intermediate_size / out_dim
+    ffn_dim_per_shard = round(out_dim_per_shard * multiplier)
+    intermediate_per_shard = intermediate_size // shards
 
     if config["pe"] == "fixed" or d_embed != out_dim:
         params["causal_transformer_shard/~/embedding_shard"] = _create_dict(
@@ -105,17 +108,24 @@ def compute_placeholder_params(config: dict):
         )
         params[header + "linear_4"] = _create_dict(  # dense_proj
             w=PlaceholderTensor(shards, out_dim, ffn_dim_per_shard, transposed=transposed_linear),
-            b=PlaceholderTensor(shards, ffn_dim_per_shard),
+            b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in "llama" else None,
         )
         params[header + "linear_5"] = _create_dict(  # dense_proj_o
             w=PlaceholderTensor(shards, ffn_dim_per_shard, out_dim, transposed=transposed_linear),
-            b=PlaceholderTensor(shards, out_dim),
+            b=PlaceholderTensor(shards, out_dim) if compat not in "llama" else None,
         )
+        if compat == "llama":
+            params[header + "linear_6"] = _create_dict(  # dense_proj
+                w=PlaceholderTensor(shards, out_dim, ffn_dim_per_shard, transposed=transposed_linear),
+                b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in "llama" else None,
+            )
         params[header + "replicated_layer_norm"] = _create_dict(  # norm
             offset=PlaceholderTensor(shards, out_dim),
             scale=PlaceholderTensor(shards, out_dim),
         )
         if compat != "j":
+            # "norm": ["norm", "rmsnorm"],
+            # rms_norm
             params[header + "replicated_layer_norm_1"] = _create_dict(  # norm_2
                 offset=PlaceholderTensor(shards, out_dim),
                 scale=PlaceholderTensor(shards, out_dim),
@@ -190,7 +200,7 @@ class CausalTransformerShard(hk.Module):
             if not l.do_layer_norm_before:
                 x = f_psum(x)
                 x = hk.remat(l.norm)(x)
-            if not l.neox_gpt_j_residual and l.compat != "j":
+            if not l.neox_gpt_j_residual and l.compat not in  ("j", "llama"):
                 x = x + hk.remat(l.neo_ff)(x)
                 if not l.do_layer_norm_before:
                     x = f_psum(x)
@@ -233,7 +243,7 @@ class CausalTransformerShard(hk.Module):
             if not l.do_layer_norm_before:
                 x = f_psum(x)
                 x = l.norm(x)
-            if not l.neox_gpt_j_residual and l.compat != "j":
+            if not l.neox_gpt_j_residual and l.compat not in  ("j", "llama"):
                 x = x + l.neo_ff(x)
                 if not l.do_layer_norm_before:
                     x = f_psum(x)
@@ -265,7 +275,7 @@ class CausalTransformerShard(hk.Module):
             if not l.do_layer_norm_before:
                 x = f_psum(x)
                 x = l.norm(x)
-            if not l.neox_gpt_j_residual and l.compat != "j":
+            if not l.neox_gpt_j_residual and l.compat not in  ("j", "llama"):
                 x = x + l.neo_ff(x)
                 if not l.do_layer_norm_before:
                     x = f_psum(x)
