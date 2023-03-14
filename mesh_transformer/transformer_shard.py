@@ -318,7 +318,7 @@ class CausalTransformer:
                 val_grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
                 (loss, last_loss), grad = val_grad_fn(to_bf16(state["params"]), ctx, tgt)
 
-                new_grad = jax.tree_map(lambda a, b: a + b, old_grad, grad)
+                new_grad = jax.tree_util.tree_map(lambda a, b: a + b, old_grad, grad)
                 gnorm = global_norm(grad)
                 return new_grad, (loss, last_loss, gnorm)
 
@@ -328,7 +328,7 @@ class CausalTransformer:
                 gnorm = global_norm(grad)
             else:
                 grad, (loss, last_loss, gnorm) = jax.lax.scan(microbatch,
-                                                       jax.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
+                                                       jax.tree_util.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
                                                                     state["params"]),
                                                        (ctx, tgt))
 
@@ -437,7 +437,7 @@ class CausalTransformer:
         seq = config["seq"]
         vocab = config["n_vocab"] + config.get("n_vocab_padding", 0)
 
-        example_shape = (max(dp // jax.host_count(), 1), seq,)
+        example_shape = (max(dp // jax.process_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
         head_print("key shape", jnp.array(key.take(mp_per_host)).shape)
@@ -644,19 +644,19 @@ class CausalTransformerV2:
                 "step": P(),
 
                 # fp32 params are also sharded (so this is like a weird mix between zero-1 and zero-3...)
-                "params": jax.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["params"]),
+                "params": jax.tree_util.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["params"]),
             }
 
         if "opt_state" in param_shapes:
             # zero level 1: shard optimizer states over both MP and DP
-            state_shard["opt_state"] = jax.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["opt_state"])
+            state_shard["opt_state"] = jax.tree_util.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["opt_state"])
 
         self.state_shard = state_shard
 
         head_print("sharding strategy:")
         # head_print("state shard: ", state_shard)
         # head_print("param_shapes: ", param_shapes)
-        jax.tree_map(head_print, state_shard, param_shapes)
+        jax.tree_util.tree_map(head_print, state_shard, param_shapes)
 
         self.init_pjit = pjit(init, in_axis_resources=(None, P("dp")), out_axis_resources=state_shard)
 
@@ -687,7 +687,7 @@ class CausalTransformerV2:
 
             return projection_apply_fn(params["proj"], x, y)
 
-        mp_shard_strategy = jax.tree_map(partial(shard_strategy, parallel=["mp"]), param_shapes["params"])
+        mp_shard_strategy = jax.tree_util.tree_map(partial(shard_strategy, parallel=["mp"]), param_shapes["params"])
 
         def train(state, ctx, tgt):
             if early_collect:
@@ -701,7 +701,7 @@ class CausalTransformerV2:
                 val_grad_fn = jax.value_and_grad(train_apply_fn, has_aux=True, allow_int=True)
                 (loss, last_loss), grad = val_grad_fn(bf16_params, ctx, tgt)
 
-                new_grad = jax.tree_map(lambda a, b: a + b, old_grad, grad)
+                new_grad = jax.tree_util.tree_map(lambda a, b: a + b, old_grad, grad)
                 return new_grad, (loss, last_loss)
 
             if ctx.shape[0] == 1:
@@ -709,7 +709,7 @@ class CausalTransformerV2:
                 (loss, last_loss), grad = val_grad_fn(bf16_params, ctx[0], tgt[0])
             else:
                 grad, (loss, last_loss) = jax.lax.scan(microbatch,
-                                                       jax.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
+                                                       jax.tree_util.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
                                                                     bf16_params),
                                                        (ctx, tgt))
 
@@ -834,7 +834,7 @@ class CausalTransformerV2:
         seq = config["seq"]
         vocab = config["n_vocab"]
 
-        example_shape = (max(dp // jax.host_count(), 1), seq,)
+        example_shape = (max(dp // jax.process_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
         head_print("in shape", x.shape)

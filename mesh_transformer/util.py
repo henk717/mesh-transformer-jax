@@ -62,7 +62,7 @@ if HAS_OPTAX:
             del params
             g_norm = global_norm(updates, use_psum=use_psum)
             trigger = g_norm < max_norm
-            updates = jax.tree_map(
+            updates = jax.tree_util.tree_map(
                 lambda t: jnp.where(trigger, t, (t / g_norm) * max_norm), updates)
             return updates, state
 
@@ -83,22 +83,22 @@ if HAS_OPTAX:
             return AdditiveWeightDecayState()
 
         def update_fn(updates, state, params):
-            updates = jax.tree_map(lambda g, p: g + weight_decay * p * (len(g.shape) > 1), updates, params)
+            updates = jax.tree_util.tree_map(lambda g, p: g + weight_decay * p * (len(g.shape) > 1), updates, params)
             return updates, state
 
         return GradientTransformation(init_fn, update_fn)
 
 
 def to_f32(t):
-    return jax.tree_map(lambda x: x.astype(jnp.float32) if x.dtype == jnp.bfloat16 else x, t)
+    return jax.tree_util.tree_map(lambda x: x.astype(jnp.float32) if x.dtype == jnp.bfloat16 else x, t)
 
 
 def to_bf16(t):
-    return jax.tree_map(lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x, t)
+    return jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x, t)
 
 
 def to_f16(t):
-    return jax.tree_map(lambda x: x.astype(jnp.float16) if x.dtype == jnp.float32 else x, t)
+    return jax.tree_util.tree_map(lambda x: x.astype(jnp.float16) if x.dtype == jnp.float32 else x, t)
 
 
 # identity in forward pass, psum in backward
@@ -179,7 +179,7 @@ def unshard_axis(x, axis_name):
 
 # print but only on the first node
 def head_print(*args, **kwargs):
-    if jax.host_id() == 0:
+    if jax.process_index() == 0:
         print(*args, **kwargs)
 
 

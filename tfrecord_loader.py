@@ -46,7 +46,7 @@ class TFRecordLoader:
             file = file.prefetch(10)
 
             for file_idx, data in enumerate(file):
-                data = jax.tree_map(lambda x: x.numpy(), data)
+                data = jax.tree_util.tree_map(lambda x: x.numpy(), data)
                 data = self.map_fn(data)
 
                 if not self.file_idx_init and file_idx <= self.file_idx:
@@ -55,7 +55,7 @@ class TFRecordLoader:
                     continue
                 self.file_idx_init = True
                 self.file_idx = file_idx
-                yield jax.tree_map(lambda x: x.reshape(self.bs + x.shape[1:]), data)
+                yield jax.tree_util.tree_map(lambda x: x.reshape(self.bs + x.shape[1:]), data)
             self.used.append(i)
             self.file_idx = 0
 
