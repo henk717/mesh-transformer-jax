@@ -247,7 +247,7 @@ def tree_flatten_with_names(pytree, is_leaf, path="", to_id=id):
 
 
 def tree_leaves_with_names(pytree, to_id=id):
-    leaves = jax.tree_leaves(pytree)
+    leaves = jax.tree_util.tree_leaves(pytree)
     is_leaf = lambda x: not isinstance(x, list) and to_id(x) in [to_id(x) for x in leaves]
     return tree_flatten_with_names(pytree, is_leaf)
 
@@ -261,8 +261,8 @@ def write_ckpt_v2(model_state, dir):
         meta = {
                     "total_hosts": jax.process_count(),
                     "step": int(model_state["step"]),
-                    "param_order": [param_map[id(i)] for i in jax.tree_leaves(model_state["params"])],
-                    "opt_order": [opt_map[id(i)] for i in jax.tree_leaves(model_state["opt_state"])]
+                    "param_order": [param_map[id(i)] for i in jax.tree_util.tree_leaves(model_state["params"])],
+                    "opt_order": [opt_map[id(i)] for i in jax.tree_util.tree_leaves(model_state["opt_state"])]
         }
 
         print("step:", model_state["step"])
