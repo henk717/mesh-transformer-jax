@@ -339,10 +339,6 @@ def read_sharded_v2(state, dir, checkpoint_hosts, state_shard):
 
         return jax.device_put(ret_val, jax.devices("cpu")[0])
 
-    # head_print("state", jax.tree_structure(state))
-    # head_print("state_shard", jax.tree_structure(state_shard))
-    # head_print("values", jax.tree_structure(values[0]))
-
     return jax.tree_util.tree_map(reshard_v2, *([state, state_shard] + values))
 
 
