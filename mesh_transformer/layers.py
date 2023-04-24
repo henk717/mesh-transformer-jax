@@ -524,7 +524,7 @@ class TransformerLayerShard(hk.Module):
         self.dim_per_head = dim // heads
         self.heads_per_shard = heads // shards
         self.dim_per_shard = dim // shards
-        self.intermediate_size = config.get("intermediate_size", dim)
+        self.intermediate_size = dim if config.get("intermediate_size", dim) is None else config.get("intermediate_size", dim)
         self.multiplier = 4 if self.intermediate_size == dim else self.intermediate_size / dim
         self.out_dim_per_shard = round(self.dim_per_shard * self.multiplier)
         self.pe_rotary_dims = int(config["pe_rotary_pct"] * self.dim_per_head) if "pe_rotary_pct" in config and 0 <= config["pe_rotary_pct"] <= 1 else config.get("pe_rotary_dims", self.dim_per_head)

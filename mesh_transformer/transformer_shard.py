@@ -63,7 +63,7 @@ def compute_placeholder_params(config: dict):
     seq = config["seq"]
     in_dim = config["n_vocab"] + config.get("n_vocab_padding", 0)
     out_dim = config["d_model"]
-    intermediate_size = config.get("intermediate_size", out_dim)
+    intermediate_size = out_dim if config.get("intermediate_size", out_dim) is None else config.get("intermediate_size", out_dim) 
     d_embed = config.get("d_embed", out_dim)
     shards = config["cores_per_replica"]
     in_dim_per_shard = in_dim // shards
