@@ -504,9 +504,9 @@ class TransformerLayerShard(hk.Module):
         self.compat = config.get("compat", "j")
         self.pe_shift = config.get("pe_shift", 2 if self.compat in ("fairseq_lm",) else 0)
         self.activation_fn = getactfn(config.get("activation", "relu" if self.compat in ("opt",) else "gelu" if self.compat in ("fairseq_lm",) else "gelu_fast" if self.compat in ("neox", "bloom") else "silu" if self.compat in ("llama") else "gelu_new" ))
-        self.neox_gpt_j_residual = self.compat in ("neox") and config.get("neox_gpt_j_residual", True)
+        self.neox_gpt_j_residual = self.compat  == "neox" and config.get("neox_gpt_j_residual", True)
         self.use_combined_qkv = config.get("combined_qkv", self.compat in ("neox", "bloom"))
-        self.early_all_reduce = self.compat in ("neox") and not self.neox_gpt_j_residual
+        self.early_all_reduce = self.compat  == "neox" and not self.neox_gpt_j_residual
         self.do_layer_norm_before = config.get("do_layer_norm_before", True)
         self.transposed_linear = config.get("transposed_linear", False)
         assert dim % heads == 0
