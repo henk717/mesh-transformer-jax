@@ -63,15 +63,14 @@ def compute_placeholder_params(config: dict):
     seq = config["seq"]
     in_dim = config["n_vocab"] + config.get("n_vocab_padding", 0)
     out_dim = config["d_model"]
-    intermediate_size = out_dim if config.get("intermediate_size", out_dim) is None else config.get("intermediate_size", out_dim) 
     d_embed = config.get("d_embed", out_dim)
     shards = config["cores_per_replica"]
     in_dim_per_shard = in_dim // shards
     out_dim_per_shard = out_dim // shards
-    multiplier = 4 if intermediate_size == out_dim else intermediate_size / out_dim
-    ffn_dim_per_shard = round(out_dim_per_shard * multiplier)
+    intermediate_size = out_dim if config.get("intermediate_size", out_dim) is None else config.get("intermediate_size", out_dim)
     intermediate_per_shard = intermediate_size // shards
-
+    ffn_dim_per_shard = out_dim_per_shard * 4 if intermediate_size == out_dim else intermediate_per_shard
+    assert intermediate_size is not None
     if config["pe"] == "fixed" or d_embed != out_dim:
         params["causal_transformer_shard/~/embedding_shard"] = _create_dict(
             pos_embs=PlaceholderTensor(shards, seq, out_dim_per_shard) if config["pe"] == "fixed" else None,  # positional_embeddings
@@ -108,26 +107,27 @@ def compute_placeholder_params(config: dict):
         )
         params[header + "linear_4"] = _create_dict(  # dense_proj
             w=PlaceholderTensor(shards, out_dim, ffn_dim_per_shard, transposed=transposed_linear),
-            b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in "llama" else None,
+            b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in ("llama") else None,
         )
         params[header + "linear_5"] = _create_dict(  # dense_proj_o
             w=PlaceholderTensor(shards, ffn_dim_per_shard, out_dim, transposed=transposed_linear),
-            b=PlaceholderTensor(shards, out_dim) if compat not in "llama" else None,
+            b=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
         )
         if compat == "llama":
             params[header + "linear_6"] = _create_dict(  # dense_proj
                 w=PlaceholderTensor(shards, out_dim, ffn_dim_per_shard, transposed=transposed_linear),
-                b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in "llama" else None,
+                b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in ("llama") else None,
             )
+
         params[header + "replicated_layer_norm"] = _create_dict(  # norm
-            offset=PlaceholderTensor(shards, out_dim),
+            offset=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
             scale=PlaceholderTensor(shards, out_dim),
         )
         if compat != "j":
             # "norm": ["norm", "rmsnorm"],
             # rms_norm
             params[header + "replicated_layer_norm_1"] = _create_dict(  # norm_2
-                offset=PlaceholderTensor(shards, out_dim),
+                offset=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
                 scale=PlaceholderTensor(shards, out_dim),
             )
 
@@ -140,9 +140,14 @@ def compute_placeholder_params(config: dict):
             w=PlaceholderTensor(shards, d_embed, in_dim_per_shard, transposed=transposed_linear),
             b=PlaceholderTensor(shards, in_dim_per_shard) if compat == "j" else None,
         )
-    if do_layer_norm_before or compat != "opt":
+    if compat == "llama":
         params["causal_transformer_shard/~/projection_shard/~/replicated_layer_norm"] = _create_dict(  # norm
-            offset=PlaceholderTensor(shards, out_dim),
+            offset=None,
+            scale=PlaceholderTensor(shards, out_dim),
+        )
+    elif do_layer_norm_before or compat != "opt":
+        params["causal_transformer_shard/~/projection_shard/~/replicated_layer_norm"] = _create_dict(  # norm
+            offset=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
             scale=PlaceholderTensor(shards, out_dim),
         )
 
@@ -200,7 +205,7 @@ class CausalTransformerShard(hk.Module):
             if not l.do_layer_norm_before:
                 x = f_psum(x)
                 x = hk.remat(l.norm)(x)
-            if not l.neox_gpt_j_residual and l.compat not in  ("j", "llama"):
+            if not l.neox_gpt_j_residual and l.compat != "j":
                 x = x + hk.remat(l.neo_ff)(x)
                 if not l.do_layer_norm_before:
                     x = f_psum(x)
@@ -243,7 +248,7 @@ class CausalTransformerShard(hk.Module):
             if not l.do_layer_norm_before:
                 x = f_psum(x)
                 x = l.norm(x)
-            if not l.neox_gpt_j_residual and l.compat not in  ("j", "llama"):
+            if not l.neox_gpt_j_residual and l.compat != "j":
                 x = x + l.neo_ff(x)
                 if not l.do_layer_norm_before:
                     x = f_psum(x)
@@ -275,7 +280,7 @@ class CausalTransformerShard(hk.Module):
             if not l.do_layer_norm_before:
                 x = f_psum(x)
                 x = l.norm(x)
-            if not l.neox_gpt_j_residual and l.compat not in  ("j", "llama"):
+            if not l.neox_gpt_j_residual and l.compat != "j":
                 x = x + l.neo_ff(x)
                 if not l.do_layer_norm_before:
                     x = f_psum(x)
