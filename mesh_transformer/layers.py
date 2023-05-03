@@ -9,9 +9,10 @@ from jax.experimental.maps import thread_resources
 
 
 class ReplicatedLayerNorm(hk.Module):
-    def __init__(self, offset=True):
+    def __init__(self, offset=True, eps=1e-5):
         super().__init__()
         self.offset = offset
+        self.eps = eps
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         mean = jnp.mean(inputs, axis=-1, keepdims=True)
@@ -21,24 +22,23 @@ class ReplicatedLayerNorm(hk.Module):
         scale = hk.get_parameter("scale", param_shape, inputs.dtype, init=jnp.ones)
         scale = jax.lax.all_gather(scale, "shard")[0]
 
-        offset = hk.get_parameter("offset", param_shape, inputs.dtype, init=jnp.zeros)
-        offset = jax.lax.all_gather(offset, "shard")[0]
-
         scale = jnp.broadcast_to(scale, inputs.shape)
-        offset = jnp.broadcast_to(offset, inputs.shape)
         mean = jnp.broadcast_to(mean, inputs.shape)
-
-        inv = scale * jax.lax.rsqrt(variance + 1e-5)
+        inv = scale * jax.lax.rsqrt(variance + self.eps)
         if self.offset:
+            offset = hk.get_parameter("offset", param_shape, inputs.dtype, init=jnp.zeros)
+            offset = jax.lax.all_gather(offset, "shard")[0]
+            offset = jnp.broadcast_to(offset, inputs.shape)
             return inv * (inputs - mean) + offset
         else:
             return inv * (inputs - mean)
 
 
 class ReplicatedDoubleLayerNorm(hk.Module):
-    def __init__(self, offset=True):
+    def __init__(self, offset=True, eps=1e-5):
         super().__init__(name="replicated_layer_norm")
         self.offset = offset
+        self.eps = eps
 
     def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
         mean = jnp.mean(inputs, axis=-1, keepdims=True)
@@ -58,7 +58,7 @@ class ReplicatedDoubleLayerNorm(hk.Module):
         offset = jnp.broadcast_to(offset, inputs.shape)
         mean = jnp.broadcast_to(mean, inputs.shape)
 
-        inv = scale * jax.lax.rsqrt(variance + 1e-5)
+        inv = scale * jax.lax.rsqrt(variance + self.eps)
         if self.offset:
             return inv * (inputs - mean) + offset
         else:
@@ -66,14 +66,15 @@ class ReplicatedDoubleLayerNorm(hk.Module):
 
 
 class RMSNorm(hk.Module):
-    def __init__(self, offset, elementwise):
+    def __init__(self, offset, elementwise, eps=1e-5):
         super().__init__()
         self.offset = offset
         self.elementwise = elementwise
+        self.eps = eps
 
     def __call__(self, x):
         param_shape = (x.shape[-1],) if self.elementwise else ()
-        normed = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1e-5)
+        normed = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + self.eps)
 
         scale = hk.get_parameter('scale', param_shape, init=hk.initializers.Constant(x.shape[-1] ** 0.5))
         scale = jax.lax.pmean(scale, "shard")
@@ -87,25 +88,25 @@ class RMSNorm(hk.Module):
         return normed
 
 
-def getnorm(type):
+def getnorm(type, eps):
     if type == "layernorm":
-        return ReplicatedLayerNorm()
+        return ReplicatedLayerNorm(eps=eps)
     if type == "layernorm-desync":
         return hk.LayerNorm(-1, True, True)
     elif type == "layernorm-nobias":
-        return ReplicatedLayerNorm(offset=False)
+        return ReplicatedLayerNorm(offset=False, eps=eps)
     elif type == "doublelayernorm":
-        return ReplicatedDoubleLayerNorm()
+        return ReplicatedDoubleLayerNorm(eps=eps)
     elif type == "doublelayernorm-nobias":
-        return ReplicatedDoubleLayerNorm(offset=False)
+        return ReplicatedDoubleLayerNorm(offset=False, eps=eps)
     elif type == "rmsnorm":
-        return RMSNorm(False, True)
+        return RMSNorm(False, True, eps=eps)
     elif type == "scalenorm":
-        return RMSNorm(False, False)
+        return RMSNorm(False, False, eps=eps)
     elif type == "rmsnorm-bias":
-        return RMSNorm(True, True)
+        return RMSNorm(True, True, eps=eps)
     elif type == "scalenorm-bias":
-        return RMSNorm(True, False)
+        return RMSNorm(True, False, eps=eps)
     else:
         raise Exception("Not implemented")
 
@@ -373,6 +374,7 @@ class EmbeddingShard(hk.Module):
         in_dim = config["n_vocab"] + config.get("n_vocab_padding", 0)
         out_dim = config["d_model"]
         shards = config["cores_per_replica"]
+        eps =  float(config.get("rms_norm_eps", 1e-5))
         self.compat = config.get("compat", "j")
         self.pe_shift = config.get("pe_shift", 2 if self.compat in ("fairseq_lm",) else 0)
 
@@ -403,10 +405,10 @@ class EmbeddingShard(hk.Module):
         else:
             self.positional_embeddings = None
 
-        self.proj = TransposingLinear(self.in_dim_per_shard, self.d_embed, w_init=hk.initializers.TruncatedNormal(stddev=1 / np.sqrt(in_dim)), with_bias=self.compat not in ("neo", "fairseq_lm", "neox", "opt", "bloom"))
+        self.proj = TransposingLinear(self.in_dim_per_shard, self.d_embed, w_init=hk.initializers.TruncatedNormal(stddev=1 / np.sqrt(in_dim)), with_bias=self.compat not in ("neo", "fairseq_lm", "neox", "opt", "bloom", "llama"))
 
         if self.compat == "bloom":
-            self.norm = getnorm(config["norm"])
+            self.norm = getnorm(config["norm"], eps)
 
         if self.d_embed != self.out_dim:
             if self.transposed_linear:
@@ -493,20 +495,20 @@ class TransformerLayerShard(hk.Module):
         heads = config["n_heads"]
         dim = config["d_model"]
         shards = config["cores_per_replica"]
-        norm = getnorm(config["norm"])
+        eps = float(config.get("rms_norm_eps", 1e-5))
+        norm = getnorm(config["norm"], eps)
         self.is_rotary = config["pe"] in ("rotary", "neox_rotary")
         self.is_neox_rotary = config["pe"] == "neox_rotary"
         self.attention_type = attention_type
         self.local_attention_window = config.get("local_attention_window", 256)
         self.compat = config.get("compat", "j")
         self.pe_shift = config.get("pe_shift", 2 if self.compat in ("fairseq_lm",) else 0)
-        self.activation_fn = getactfn(config.get("activation", "relu" if self.compat in ("opt",) else "gelu" if self.compat in ("fairseq_lm",) else "gelu_fast" if self.compat in ("neox", "bloom") else "gelu_new"))
-        self.neox_gpt_j_residual = self.compat == "neox" and config.get("neox_gpt_j_residual", True)
+        self.activation_fn = getactfn(config.get("activation", "relu" if self.compat in ("opt",) else "gelu" if self.compat in ("fairseq_lm",) else "gelu_fast" if self.compat in ("neox", "bloom") else "silu" if self.compat in ("llama") else "gelu_new" ))
+        self.neox_gpt_j_residual = self.compat  == "neox" and config.get("neox_gpt_j_residual", True)
         self.use_combined_qkv = config.get("combined_qkv", self.compat in ("neox", "bloom"))
-        self.early_all_reduce = self.compat == "neox" and not self.neox_gpt_j_residual
+        self.early_all_reduce = self.compat  == "neox" and not self.neox_gpt_j_residual
         self.do_layer_norm_before = config.get("do_layer_norm_before", True)
         self.transposed_linear = config.get("transposed_linear", False)
-
         assert dim % heads == 0
         assert heads % shards == 0
         assert attention_type in ("global", "local")
@@ -518,12 +520,15 @@ class TransformerLayerShard(hk.Module):
         self.dim = dim
         self.dim_per_head = dim // heads
         self.heads_per_shard = heads // shards
+        intermediate_size = dim if config.get("intermediate_size", dim) is None else config.get("intermediate_size", dim)
+        self.intermediate_per_shard = intermediate_size // shards
         self.dim_per_shard = dim // shards
-        self.pe_rotary_dims = int(config["pe_rotary_pct"] * self.dim_per_head) if "pe_rotary_pct" in config and 0 <= config["pe_rotary_pct"] <= 1 else config.get("pe_rotary_dims", self.dim_per_head)
+        self.ffn_dim_per_shard = self.dim_per_shard * 4 if intermediate_size == dim else self.intermediate_per_shard
 
+        self.pe_rotary_dims = int(config["pe_rotary_pct"] * self.dim_per_head) if "pe_rotary_pct" in config and 0 <= config["pe_rotary_pct"] <= 1 else config.get("pe_rotary_dims", self.dim_per_head)
         self.norm = norm
         if self.compat != "j":
-            self.norm_2 = getnorm(config["norm"])
+            self.norm_2 = getnorm(config["norm"], eps)
 
         if self.use_combined_qkv:
             self.qkv = Linear(self.dim_per_shard * 3, with_bias=self.compat in ("fairseq_lm", "neox", "opt", "bloom"), transposed=self.transposed_linear, name="combined_qkv")
@@ -532,18 +537,25 @@ class TransformerLayerShard(hk.Module):
             self.v = Linear(self.dim_per_shard, with_bias=self.compat in ("fairseq_lm", "neox", "opt", "bloom"), transposed=self.transposed_linear, name="linear_1")
             self.k = Linear(self.dim_per_shard, with_bias=self.compat in ("fairseq_lm", "neox", "opt", "bloom"), transposed=self.transposed_linear, name="linear_2")
 
-        self.o = AllReduceLinear(self.dim, with_bias=self.compat in ("neo", "fairseq_lm", "neox", "opt", "bloom"),
+        self.o = AllReduceLinear(self.dim, 
+                                 with_bias=self.compat in ("neo", "fairseq_lm", "neox", "opt", "bloom"),
                                  w_init=hk.initializers.TruncatedNormal(stddev=init_scale / np.sqrt(self.dim)),
                                  transposed=self.transposed_linear,
                                  name="linear_3",
-                                 all_reduce=self.early_all_reduce, shards=shards)
+                                 all_reduce=self.early_all_reduce, 
+                                 shards=shards)
 
-        self.dense_proj = Linear(self.dim_per_shard * 4, transposed=self.transposed_linear, name="linear_4")
+        self.dense_proj = Linear(self.ffn_dim_per_shard, transposed=self.transposed_linear, name="linear_4", with_bias=self.compat != "llama" )
         self.dense_proj_o = AllReduceLinear(self.dim,
                                             w_init=hk.initializers.TruncatedNormal(stddev=init_scale / np.sqrt(self.dim)),
                                             transposed=self.transposed_linear,
                                             name="linear_5",
-                                            all_reduce=self.early_all_reduce, shards=shards)
+                                            all_reduce=self.early_all_reduce,
+                                            shards=shards,
+                                            with_bias=self.compat != "llama"
+                                            )
+        if self.compat == "llama":
+            self.dense_proj_2 = Linear(self.ffn_dim_per_shard, transposed=self.transposed_linear, name="linear_6", with_bias=self.compat != "llama")
 
     def self_attn(self, q, v, k, attn_bias):
         if self.is_rotary:
@@ -570,12 +582,12 @@ class TransformerLayerShard(hk.Module):
 
         attention_weights = jax.nn.softmax(attention_logits)
         attention_vec = jnp.einsum("htT,Thd->thd", attention_weights, v).reshape((-1, self.dim_per_shard))
-
         return self.o(attention_vec)
 
     def ff(self, x):
-        dense_proj = self.dense_proj(x)
-        dense_proj = self.activation_fn(dense_proj)
+        dense_proj = self.activation_fn(self.dense_proj(x))
+        if self.compat == "llama":
+            dense_proj = jnp.multiply(dense_proj, self.dense_proj_2(x))
         return self.dense_proj_o(dense_proj)
 
     def qvk_proj(self, x):
@@ -906,10 +918,11 @@ class ProjectionShard(hk.Module):
         self.out_dim_unpadded = config["n_vocab"]
         out_dim = self.out_dim_unpadded + config.get("n_vocab_padding", 0)
         shards = config["cores_per_replica"]
+        eps = float(config.get("rms_norm_eps", 1e-5))
         self.compat = config.get("compat", "j")
         self.do_layer_norm_before = config.get("do_layer_norm_before", True)
         if self.do_layer_norm_before or self.compat != "opt":
-            norm = getnorm(config["norm"])
+            norm = getnorm(config["norm"], eps)
 
         assert out_dim % shards == 0
 
@@ -928,7 +941,7 @@ class ProjectionShard(hk.Module):
         if self.compat in ("neo", "fairseq_lm", "opt", "bloom"):
             self.proj = embedding_shard.proj
         else:
-            self.proj = TransposingLinear(config["d_model"], self.dim_per_shard, with_bias=self.compat not in ("neo", "fairseq_lm", "neox", "opt", "bloom"), transposed=self.transposed_linear)
+            self.proj = TransposingLinear(config["d_model"], self.dim_per_shard, with_bias=self.compat not in ("neo", "fairseq_lm", "neox", "opt", "bloom", "llama"), transposed=self.transposed_linear)
 
         if self.d_embed != self.in_dim:
             if self.transposed_linear:

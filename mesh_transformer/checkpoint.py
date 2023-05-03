@@ -24,13 +24,13 @@ def fix_dtype(pytree):
             x.dtype = jnp.bfloat16
         return jnp.asarray(x)
 
-    return jax.tree_map(fix, pytree)
+    return jax.tree_util.tree_map(fix, pytree)
 
 
 @functools.partial(jax.jit, backend="cpu")
 def index_weights(weights, idx):
     cpu_device = jax.devices("cpu")[0]
-    return jax.device_put(jax.tree_map(lambda i: i[idx], weights), cpu_device)
+    return jax.device_put(jax.tree_util.tree_map(lambda i: i[idx], weights), cpu_device)
 
 
 def write(x, ckpt_dir):
@@ -60,7 +60,7 @@ def write_ckpt(pytree, dir, shard):
     # ckpt_dir = Path(dir)
     # ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    flattened, structure = jax.tree_flatten(pytree)
+    flattened, structure =jax.tree_util.tree_flatten(pytree)
 
     start = time.time()
     # cpu_flattened = jax.device_put(flattened, cpu_device)
@@ -142,7 +142,7 @@ def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
     if shards_out is None:
         shards_out = shards_in
 
-    old_flattened, structure = jax.tree_flatten(pytree)
+    old_flattened, structure =jax.tree_util.tree_flatten(pytree)
 
     original_opt_state = pytree["opt_state"]
 
@@ -181,10 +181,10 @@ def read_ckpt(pytree, dir, shards_in, shards_out=None, load_opt=True):
     except AssertionError:
         load_opt = False  # no opt to load in ckpt
         del pytree['opt_state']
-        old_flattened, structure = jax.tree_flatten(pytree)
+        old_flattened, structure =jax.tree_util.tree_flatten(pytree)
         unsharded = _unshard()
 
-    loaded_pytree = jax.tree_unflatten(structure, unsharded)
+    loaded_pytree = jax.tree_util.tree_unflatten(structure, unsharded)
 
     if not load_opt:
         loaded_pytree['opt_state'] = original_opt_state
@@ -202,7 +202,7 @@ def parallel_write(arrays, fname):
 
 
 def parallel_read(old, fname, validate=True):
-    old_vals, treedef = jax.tree_flatten(old)
+    old_vals, treedef =jax.tree_util.tree_flatten(old)
 
     if "gs://" in fname:
         # TODO: make this actually parallel
@@ -223,7 +223,7 @@ def parallel_read(old, fname, validate=True):
         if validate:
             assert o.shape == n.shape, "Incompatible checkpoint"
 
-    return jax.tree_unflatten(treedef, fix_dtype(new_vals))
+    return jax.tree_util.tree_unflatten(treedef, fix_dtype(new_vals))
 
 
 def tree_flatten_with_names(pytree, is_leaf, path="", to_id=id):
@@ -247,22 +247,22 @@ def tree_flatten_with_names(pytree, is_leaf, path="", to_id=id):
 
 
 def tree_leaves_with_names(pytree, to_id=id):
-    leaves = jax.tree_leaves(pytree)
+    leaves = jax.tree_util.tree_leaves(pytree)
     is_leaf = lambda x: not isinstance(x, list) and to_id(x) in [to_id(x) for x in leaves]
     return tree_flatten_with_names(pytree, is_leaf)
 
 
 def write_ckpt_v2(model_state, dir):
     start = time.time()
-    if jax.host_id() == 0:
+    if jax.process_index() == 0:
         param_map = tree_leaves_with_names(model_state["params"])
         opt_map = tree_leaves_with_names(model_state["opt_state"])
 
         meta = {
-                    "total_hosts": jax.host_count(),
+                    "total_hosts": jax.process_count(),
                     "step": int(model_state["step"]),
-                    "param_order": [param_map[id(i)] for i in jax.tree_leaves(model_state["params"])],
-                    "opt_order": [opt_map[id(i)] for i in jax.tree_leaves(model_state["opt_state"])]
+                    "param_order": [param_map[id(i)] for i in jax.tree_util.tree_leaves(model_state["params"])],
+                    "opt_order": [opt_map[id(i)] for i in jax.tree_util.tree_leaves(model_state["opt_state"])]
         }
 
         print("step:", model_state["step"])
@@ -271,33 +271,33 @@ def write_ckpt_v2(model_state, dir):
         print(f"meta written in {time.time() - start:.06}s")
 
     start = time.time()
-    parallel_write(jax.tree_flatten(model_state["params"])[0], dir + f"/params/shard_{jax.host_id()}.npz")
+    parallel_write(jax.tree_util.tree_flatten(model_state["params"])[0], dir + f"/params/shard_{jax.process_index()}.npz")
     head_print(f"params written in {time.time() - start:.06}s")
 
     start = time.time()
-    parallel_write(jax.tree_flatten(model_state["opt_state"])[0], dir + f"/opt_state/shard_{jax.host_id()}.npz")
+    parallel_write(jax.tree_util.tree_flatten(model_state["opt_state"])[0], dir + f"/opt_state/shard_{jax.process_index()}.npz")
     head_print(f"opt_state written in {time.time() - start:.06}s")
 
 
 def read_sharded_v2(state, dir, checkpoint_hosts, state_shard):
     import ray
 
-    files_per_host = checkpoint_hosts // jax.host_count()
+    files_per_host = checkpoint_hosts // jax.process_count()
 
     assert files_per_host >= 1, "can't restore model to larger pod than was trained on (yet)"
-    assert jax.host_count() * files_per_host == checkpoint_hosts, "weird host count"
+    assert jax.process_count() * files_per_host == checkpoint_hosts, "weird host count"
 
     if files_per_host == 1:
         head_print("using fast path of checkpoint restore (save shards == read shards)")
-        parallel_read(state, dir + f"/shard_{jax.host_id()}.npz")
+        parallel_read(state, dir + f"/shard_{jax.process_index()}.npz")
 
     @ray.remote
     def read_remote(old, fname):
         return parallel_read(old, fname, validate=False)
 
-    start_idx = files_per_host * jax.host_id()
+    start_idx = files_per_host * jax.process_index()
 
-    skeleton = jax.tree_map(lambda x: jnp.zeros_like(x, shape=()), state)  # a full pytree just to carry dtypes
+    skeleton = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x, shape=()), state)  # a full pytree just to carry dtypes
 
     refs = [
         read_remote.remote(skeleton, f"{dir}/shard_{i}.npz")
@@ -339,11 +339,7 @@ def read_sharded_v2(state, dir, checkpoint_hosts, state_shard):
 
         return jax.device_put(ret_val, jax.devices("cpu")[0])
 
-    # head_print("state", jax.tree_structure(state))
-    # head_print("state_shard", jax.tree_structure(state_shard))
-    # head_print("values", jax.tree_structure(values[0]))
-
-    return jax.tree_multimap(reshard_v2, *([state, state_shard] + values))
+    return jax.tree_util.tree_map(reshard_v2, *([state, state_shard] + values))
 
 
 def load_ckpt_v2(model_state, dir, state_shard, load_opt):

@@ -54,7 +54,7 @@ def compute_placeholder_params(config: dict):
     do_layer_norm_before = config.get("do_layer_norm_before", True)
     transposed_linear = config.get("transposed_linear", False)
 
-    if compat not in ("j", "neo", "fairseq_lm", "neox", "opt", "bloom"):
+    if compat not in ("j", "neo", "fairseq_lm", "neox", "opt", "bloom", "llama"):
         raise NotImplementedError(f"Unsupported model type {repr(compat)}")
     if pe not in ("rotary", "neox_rotary", "fixed", "sinusoidal", "fairseq_sinusoidal", "alibi", "t5"):
         raise NotImplementedError(f"Unsupported positional embedding type {repr(pe)}")
@@ -67,8 +67,10 @@ def compute_placeholder_params(config: dict):
     shards = config["cores_per_replica"]
     in_dim_per_shard = in_dim // shards
     out_dim_per_shard = out_dim // shards
-    ffn_dim_per_shard = out_dim_per_shard * 4
-
+    intermediate_size = out_dim if config.get("intermediate_size", out_dim) is None else config.get("intermediate_size", out_dim)
+    intermediate_per_shard = intermediate_size // shards
+    ffn_dim_per_shard = out_dim_per_shard * 4 if intermediate_size == out_dim else intermediate_per_shard
+    assert intermediate_size is not None
     if config["pe"] == "fixed" or d_embed != out_dim:
         params["causal_transformer_shard/~/embedding_shard"] = _create_dict(
             pos_embs=PlaceholderTensor(shards, seq, out_dim_per_shard) if config["pe"] == "fixed" else None,  # positional_embeddings
@@ -105,19 +107,27 @@ def compute_placeholder_params(config: dict):
         )
         params[header + "linear_4"] = _create_dict(  # dense_proj
             w=PlaceholderTensor(shards, out_dim, ffn_dim_per_shard, transposed=transposed_linear),
-            b=PlaceholderTensor(shards, ffn_dim_per_shard),
+            b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in ("llama") else None,
         )
         params[header + "linear_5"] = _create_dict(  # dense_proj_o
             w=PlaceholderTensor(shards, ffn_dim_per_shard, out_dim, transposed=transposed_linear),
-            b=PlaceholderTensor(shards, out_dim),
+            b=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
         )
+        if compat == "llama":
+            params[header + "linear_6"] = _create_dict(  # dense_proj
+                w=PlaceholderTensor(shards, out_dim, ffn_dim_per_shard, transposed=transposed_linear),
+                b=PlaceholderTensor(shards, ffn_dim_per_shard) if compat not in ("llama") else None,
+            )
+
         params[header + "replicated_layer_norm"] = _create_dict(  # norm
-            offset=PlaceholderTensor(shards, out_dim),
+            offset=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
             scale=PlaceholderTensor(shards, out_dim),
         )
         if compat != "j":
+            # "norm": ["norm", "rmsnorm"],
+            # rms_norm
             params[header + "replicated_layer_norm_1"] = _create_dict(  # norm_2
-                offset=PlaceholderTensor(shards, out_dim),
+                offset=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
                 scale=PlaceholderTensor(shards, out_dim),
             )
 
@@ -130,9 +140,14 @@ def compute_placeholder_params(config: dict):
             w=PlaceholderTensor(shards, d_embed, in_dim_per_shard, transposed=transposed_linear),
             b=PlaceholderTensor(shards, in_dim_per_shard) if compat == "j" else None,
         )
-    if do_layer_norm_before or compat != "opt":
+    if compat == "llama":
         params["causal_transformer_shard/~/projection_shard/~/replicated_layer_norm"] = _create_dict(  # norm
-            offset=PlaceholderTensor(shards, out_dim),
+            offset=None,
+            scale=PlaceholderTensor(shards, out_dim),
+        )
+    elif do_layer_norm_before or compat != "opt":
+        params["causal_transformer_shard/~/projection_shard/~/replicated_layer_norm"] = _create_dict(  # norm
+            offset=PlaceholderTensor(shards, out_dim) if compat not in ("llama") else None,
             scale=PlaceholderTensor(shards, out_dim),
         )
 
@@ -308,7 +323,7 @@ class CausalTransformer:
                 val_grad_fn = jax.value_and_grad(train_loss_fn, has_aux=True)
                 (loss, last_loss), grad = val_grad_fn(to_bf16(state["params"]), ctx, tgt)
 
-                new_grad = jax.tree_multimap(lambda a, b: a + b, old_grad, grad)
+                new_grad = jax.tree_util.tree_map(lambda a, b: a + b, old_grad, grad)
                 gnorm = global_norm(grad)
                 return new_grad, (loss, last_loss, gnorm)
 
@@ -318,7 +333,7 @@ class CausalTransformer:
                 gnorm = global_norm(grad)
             else:
                 grad, (loss, last_loss, gnorm) = jax.lax.scan(microbatch,
-                                                       jax.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
+                                                       jax.tree_util.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
                                                                     state["params"]),
                                                        (ctx, tgt))
 
@@ -388,7 +403,7 @@ class CausalTransformer:
                                                              ["batch", ...],
                                                              ["batch", ...],
                                                              ["batch", ...]),
-                                                    out_axes=["batch", ...],
+                                                    out_axes=(["shard", "batch", ...], ["batch", ...]),
                                                     axis_resources={'shard': 'mp', 'batch': 'dp'})
 
         self.train_xmap = jax.experimental.maps.xmap(fun=train,
@@ -407,7 +422,7 @@ class CausalTransformer:
                                                                  ["batch", ...],
                                                                  ["batch", ...],
                                                                  ["shard", ...]),
-                                                        out_axes=["batch", ...],
+                                                        out_axes=(["shard", "batch", ...], ["batch", ...]),
                                                         axis_resources={'shard': 'mp', 'batch': 'dp'})
 
         self.move_xmap = jax.experimental.maps.xmap(fun=lambda x, _: to_bf16(x),
@@ -427,7 +442,7 @@ class CausalTransformer:
         seq = config["seq"]
         vocab = config["n_vocab"] + config.get("n_vocab_padding", 0)
 
-        example_shape = (max(dp // jax.host_count(), 1), seq,)
+        example_shape = (max(dp // jax.process_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
         head_print("key shape", jnp.array(key.take(mp_per_host)).shape)
@@ -634,19 +649,19 @@ class CausalTransformerV2:
                 "step": P(),
 
                 # fp32 params are also sharded (so this is like a weird mix between zero-1 and zero-3...)
-                "params": jax.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["params"]),
+                "params": jax.tree_util.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["params"]),
             }
 
         if "opt_state" in param_shapes:
             # zero level 1: shard optimizer states over both MP and DP
-            state_shard["opt_state"] = jax.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["opt_state"])
+            state_shard["opt_state"] = jax.tree_util.tree_map(partial(shard_strategy, parallel=["mp", "dp"]), param_shapes["opt_state"])
 
         self.state_shard = state_shard
 
         head_print("sharding strategy:")
         # head_print("state shard: ", state_shard)
         # head_print("param_shapes: ", param_shapes)
-        jax.tree_multimap(head_print, state_shard, param_shapes)
+        jax.tree_util.tree_map(head_print, state_shard, param_shapes)
 
         self.init_pjit = pjit(init, in_axis_resources=(None, P("dp")), out_axis_resources=state_shard)
 
@@ -677,7 +692,7 @@ class CausalTransformerV2:
 
             return projection_apply_fn(params["proj"], x, y)
 
-        mp_shard_strategy = jax.tree_map(partial(shard_strategy, parallel=["mp"]), param_shapes["params"])
+        mp_shard_strategy = jax.tree_util.tree_map(partial(shard_strategy, parallel=["mp"]), param_shapes["params"])
 
         def train(state, ctx, tgt):
             if early_collect:
@@ -691,7 +706,7 @@ class CausalTransformerV2:
                 val_grad_fn = jax.value_and_grad(train_apply_fn, has_aux=True, allow_int=True)
                 (loss, last_loss), grad = val_grad_fn(bf16_params, ctx, tgt)
 
-                new_grad = jax.tree_multimap(lambda a, b: a + b, old_grad, grad)
+                new_grad = jax.tree_util.tree_map(lambda a, b: a + b, old_grad, grad)
                 return new_grad, (loss, last_loss)
 
             if ctx.shape[0] == 1:
@@ -699,7 +714,7 @@ class CausalTransformerV2:
                 (loss, last_loss), grad = val_grad_fn(bf16_params, ctx[0], tgt[0])
             else:
                 grad, (loss, last_loss) = jax.lax.scan(microbatch,
-                                                       jax.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
+                                                       jax.tree_util.tree_map(lambda x: jnp.zeros_like(x).astype(jnp.bfloat16),
                                                                     bf16_params),
                                                        (ctx, tgt))
 
@@ -824,7 +839,7 @@ class CausalTransformerV2:
         seq = config["seq"]
         vocab = config["n_vocab"]
 
-        example_shape = (max(dp // jax.host_count(), 1), seq,)
+        example_shape = (max(dp // jax.process_count(), 1), seq,)
         x = jax.random.uniform(next(key), example_shape, minval=0, maxval=vocab).astype(jnp.uint32)  # batch, len
 
         head_print("in shape", x.shape)

@@ -348,7 +348,7 @@ def save_pytree_as_hf(
     # Loads layers and names in reverse order to avoid loading unneeded opt_state layers
     # that are at the front of full (i.e. not slim) models.
 
-    old_leave_shapes = [old.shape for old in jax.tree_flatten(pytree)[0]]
+    old_leave_shapes = [old.shape for old in jax.tree_util.tree_flatten(pytree)[0]]
     leave_names = get_tree_leaves_names_reduced(pytree)
     del pytree
 
@@ -458,7 +458,7 @@ def save_sharded_to_hf_format(
 ):
 
     devices = np.array([jax.devices()[0]]).reshape((1, 1))
-    with maps.mesh(devices, ("dp", "mp")):
+    with maps.Mesh(devices, ("dp", "mp")):
         params_local = params.copy()
         params_local["cores_per_replica"] = maps.thread_resources.env.shape["mp"]
         network = CausalTransformer(params_local)
